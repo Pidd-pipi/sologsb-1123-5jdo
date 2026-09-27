@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Space, Tag, Typography } from 'antd';
-import type { LngLat, Mission } from '../../types/mission';
+import type { LngLat, Mission, NoFlyZone } from '../../types/mission';
 import type { Waypoint } from '../../types/waypoint';
-import { createProjector, distanceMeters, groundCoverage } from '../../utils/geoCalc';
+import { createProjector, distanceMeters, groundCoverage, metersPerDegLng, METERS_PER_DEG_LAT, NO_FLY_SAFETY_MARGIN_M } from '../../utils/geoCalc';
 import { loadAmap, readAmapKey, type AMapNamespace } from '../../utils/amapLoader';
 
 export interface AmapRouteViewProps {
@@ -18,6 +18,10 @@ export interface AmapRouteViewProps {
   highlightSeq?: number;
   /** 航点标注（用于单点视场预览） */
   withFov?: boolean;
+  /** 任务级临时禁飞区（仅绘制启用中的区域） */
+  noFlyZones?: NoFlyZone[];
+  /** 与禁飞区冲突的航段（红色高亮） */
+  conflictSegments?: { fromSeq: number; toSeq: number }[];
 }
 
 const GRID_W = 760;
@@ -35,6 +39,8 @@ export default function AmapRouteView({
   onPickPoint,
   highlightSeq,
   withFov = true,
+  noFlyZones = [],
+  conflictSegments = [],
 }: AmapRouteViewProps) {
   const [amap, setAmap] = useState<AMapNamespace | null>(null);
   const [mode, setMode] = useState<'loading' | 'amap' | 'grid'>('loading');
@@ -122,6 +128,53 @@ export default function AmapRouteView({
         );
       }
     });
+    // 启用中的禁飞区：实心圈为管制范围，虚线圈为边界外的安全余量
+    noFlyZones
+      .filter((z) => z.enabled && z.radius > 0)
+      .forEach((z) => {
+        overlays.push(
+          new amap.Circle({
+            center: [z.lng, z.lat],
+            radius: z.radius,
+            strokeColor: '#c0392b',
+            strokeWeight: 2,
+            fillColor: '#e74c3c',
+            fillOpacity: 0.18,
+          }),
+        );
+        overlays.push(
+          new amap.Circle({
+            center: [z.lng, z.lat],
+            radius: z.radius + NO_FLY_SAFETY_MARGIN_M,
+            strokeColor: '#c0392b',
+            strokeWeight: 1,
+            strokeStyle: 'dashed',
+            fillOpacity: 0,
+          }),
+        );
+        overlays.push(
+          new amap.Marker({
+            position: [z.lng, z.lat],
+            title: `禁飞区：${z.name}（半径 ${z.radius} m）`,
+          }),
+        );
+      });
+    // 与禁飞区冲突的航段红色高亮
+    conflictSegments.forEach((seg) => {
+      const from = waypoints.find((w) => w.seq === seg.fromSeq);
+      const to = waypoints.find((w) => w.seq === seg.toSeq);
+      if (!from || !to) return;
+      overlays.push(
+        new amap.Polyline({
+          path: [
+            [from.lng, from.lat],
+            [to.lng, to.lat],
+          ],
+          strokeColor: '#d93025',
+          strokeWeight: 5,
+        }),
+      );
+    });
     overlays.forEach((o) => map.add(o));
     map.setFitView();
     return () => {
@@ -132,12 +185,21 @@ export default function AmapRouteView({
       }
       mapRef.current = null;
     };
-  }, [mode, amap, mission, waypoints, withFov]);
+  }, [mode, amap, mission, waypoints, withFov, noFlyZones, conflictSegments]);
 
   // 本地 SVG 网格视图：等比投影，完全离线
   const projection = useMemo(() => {
     const poly: LngLat[] = mission && mission.areaPolygon.length >= 3 ? mission.areaPolygon : [[116.391, 39.907], [116.398, 39.907], [116.398, 39.903], [116.391, 39.903]];
     const all: LngLat[] = [...poly, ...waypoints.map((w) => [w.lng, w.lat] as LngLat)];
+    // 启用中的禁飞圈（含安全余量）也纳入视野，避免画出画布外
+    noFlyZones
+      .filter((z) => z.enabled && z.radius > 0)
+      .forEach((z) => {
+        const reach = z.radius + NO_FLY_SAFETY_MARGIN_M;
+        const dLat = reach / METERS_PER_DEG_LAT;
+        const dLng = reach / metersPerDegLng(z.lat);
+        all.push([z.lng - dLng, z.lat - dLat], [z.lng + dLng, z.lat + dLat]);
+      });
     const lngs = all.map((p) => p[0]);
     const lats = all.map((p) => p[1]);
     const box: LngLat[] = [
@@ -147,7 +209,7 @@ export default function AmapRouteView({
       [Math.min(...lngs), Math.max(...lats)],
     ];
     return { poly, box, projector: createProjector(box, GRID_W, height) };
-  }, [mission, waypoints, height]);
+  }, [mission, waypoints, noFlyZones, height]);
 
   const pxPerMeter = useMemo(() => {
     const { box, projector } = projection;
@@ -173,6 +235,33 @@ export default function AmapRouteView({
       };
     });
   }, [withFov, mission, waypoints, projection, pxPerMeter]);
+
+  // 禁飞圈在等经纬度投影下呈椭圆：管制范围实心 + 安全余量虚线环
+  const zoneEllipses = useMemo(() => {
+    const { projector } = projection;
+    return noFlyZones
+      .filter((z) => z.enabled && z.radius > 0)
+      .map((z) => {
+        const c = projector.toXY([z.lng, z.lat]);
+        const east = projector.toXY([z.lng + z.radius / metersPerDegLng(z.lat), z.lat]);
+        const north = projector.toXY([z.lng, z.lat + z.radius / METERS_PER_DEG_LAT]);
+        const reach = z.radius + NO_FLY_SAFETY_MARGIN_M;
+        const eastSafe = projector.toXY([z.lng + reach / metersPerDegLng(z.lat), z.lat]);
+        const northSafe = projector.toXY([z.lng, z.lat + reach / METERS_PER_DEG_LAT]);
+        return {
+          id: z.id,
+          name: z.name,
+          cx: c.x,
+          cy: c.y,
+          rx: east.x - c.x,
+          ry: c.y - north.y,
+          rxSafe: eastSafe.x - c.x,
+          rySafe: c.y - northSafe.y,
+        };
+      });
+  }, [noFlyZones, projection]);
+
+  const conflictKeySet = useMemo(() => new Set(conflictSegments.map((s) => `${s.fromSeq}-${s.toSeq}`)), [conflictSegments]);
 
   if (mode === 'loading') {
     return (
@@ -246,6 +335,25 @@ export default function AmapRouteView({
           <polygon points={polygonPath} fill="#8ecae6" fillOpacity="0.25" stroke="#1d3557" strokeWidth="2" />
         ) : null}
 
+        {zoneEllipses.map((z) => (
+          <g key={`nfz-${z.id}`}>
+            <ellipse
+              cx={z.cx}
+              cy={z.cy}
+              rx={z.rxSafe}
+              ry={z.rySafe}
+              fill="none"
+              stroke="#c0392b"
+              strokeWidth={1}
+              strokeDasharray="6 4"
+            />
+            <ellipse cx={z.cx} cy={z.cy} rx={z.rx} ry={z.ry} fill="#e74c3c" fillOpacity={0.18} stroke="#c0392b" strokeWidth={2} />
+            <text x={z.cx} y={z.cy - z.rySafe - 4} fontSize="11" fill="#c0392b" textAnchor="middle">
+              {z.name}
+            </text>
+          </g>
+        ))}
+
         {linePath.length >= 2 ? (
           <polyline
             points={linePath.map((p) => `${p.x},${p.y}`).join(' ')}
@@ -254,6 +362,26 @@ export default function AmapRouteView({
             strokeWidth="2.5"
           />
         ) : null}
+
+        {linePath.length >= 2
+          ? waypoints.slice(1).map((w, i) => {
+              const key = `${waypoints[i].seq}-${w.seq}`;
+              if (!conflictKeySet.has(key)) return null;
+              const a = linePath[i];
+              const b = linePath[i + 1];
+              return (
+                <line
+                  key={`conflict-${key}`}
+                  x1={a.x}
+                  y1={a.y}
+                  x2={b.x}
+                  y2={b.y}
+                  stroke="#d93025"
+                  strokeWidth={4.5}
+                />
+              );
+            })
+          : null}
 
         {waypoints.map((w) => {
           const p = projection.projector.toXY([w.lng, w.lat]);
@@ -279,6 +407,8 @@ export default function AmapRouteView({
         <Tag color="blue">测区边界</Tag>
         <Tag color="orange">航点折线（{waypoints.length} 点）</Tag>
         <Tag>每航点视场矩形</Tag>
+        {zoneEllipses.length > 0 ? <Tag color="red">禁飞区（{zoneEllipses.length} 处）</Tag> : null}
+        {conflictSegments.length > 0 ? <Tag color="red">冲突航段（{conflictSegments.length} 段）</Tag> : null}
         <Tag color="gold">1 px ≈ {pxPerMeter > 0 ? (1 / pxPerMeter).toFixed(1) : '—'} m</Tag>
         {onPickPoint ? <Tag color="green">点击网格可新增航点</Tag> : null}
       </Space>

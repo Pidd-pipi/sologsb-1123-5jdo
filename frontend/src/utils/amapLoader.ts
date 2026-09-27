@@ -17,6 +17,7 @@ export interface AMapNamespace {
   Polyline: new (options: Record<string, unknown>) => unknown;
   Marker: new (options: Record<string, unknown>) => unknown;
   Rectangle: new (options: Record<string, unknown>) => unknown;
+  Circle: new (options: Record<string, unknown>) => unknown;
   Pixel: new (x: number, y: number) => unknown;
   LngLat: new (lng: number, lat: number) => unknown;
 }

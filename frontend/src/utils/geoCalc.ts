@@ -1,5 +1,8 @@
-import type { LngLat } from '../types/mission';
+import type { LngLat, NoFlyZone } from '../types/mission';
 import { round } from './id';
+
+/** 禁飞区边界外的安全余量 m：航段距边界不足该值即视为冲突 */
+export const NO_FLY_SAFETY_MARGIN_M = 50;
 
 /** 每度纬度对应的米数（近似） */
 export const METERS_PER_DEG_LAT = 111320;
@@ -30,6 +33,66 @@ export function distanceMeters(a: LngLat, b: LngLat): number {
   const p = lngLatToMeters(a, a);
   const q = lngLatToMeters(b, a);
   return Math.hypot(q.x - p.x, q.y - p.y);
+}
+
+/** 点到航段的最短水平距离 m（等距圆柱近似投影后按平面几何计算） */
+export function distancePointToSegmentMeters(p: LngLat, a: LngLat, b: LngLat): number {
+  const origin = a;
+  const pa = lngLatToMeters(a, origin);
+  const pb = lngLatToMeters(b, origin);
+  const pp = lngLatToMeters(p, origin);
+  const dx = pb.x - pa.x;
+  const dy = pb.y - pa.y;
+  const lenSq = dx * dx + dy * dy;
+  // 端点重合时退化为点到点距离
+  const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((pp.x - pa.x) * dx + (pp.y - pa.y) * dy) / lenSq));
+  return Math.hypot(pp.x - (pa.x + t * dx), pp.y - (pa.y + t * dy));
+}
+
+/** 一条航段与禁飞区的冲突结果 */
+export interface NoFlyConflict {
+  zoneId: string;
+  zoneName: string;
+  /** 航段起点序号 */
+  fromSeq: number;
+  /** 航段终点序号 */
+  toSeq: number;
+  /** 禁飞区中心到该航段的最近距离 m */
+  distance: number;
+  /** 判定阈值 m：禁飞区半径 + 安全余量 */
+  limit: number;
+}
+
+/**
+ * 逐段检查航点折线是否闯入启用中的禁飞区（含边界外安全余量）。
+ * 航段距中心 < 半径 + 余量 即冲突；关闭（enabled=false）的区域不参与检查。
+ */
+export function findNoFlyConflicts(
+  segments: { fromSeq: number; toSeq: number; from: LngLat; to: LngLat }[],
+  zones: NoFlyZone[],
+  safetyMarginM: number = NO_FLY_SAFETY_MARGIN_M,
+): NoFlyConflict[] {
+  const conflicts: NoFlyConflict[] = [];
+  zones
+    .filter((z) => z.enabled && z.radius > 0)
+    .forEach((zone) => {
+      const center: LngLat = [zone.lng, zone.lat];
+      const limit = zone.radius + safetyMarginM;
+      segments.forEach((seg) => {
+        const distance = distancePointToSegmentMeters(center, seg.from, seg.to);
+        if (distance < limit) {
+          conflicts.push({
+            zoneId: zone.id,
+            zoneName: zone.name,
+            fromSeq: seg.fromSeq,
+            toSeq: seg.toSeq,
+            distance: round(distance, 1),
+            limit: round(limit, 1),
+          });
+        }
+      });
+    });
+  return conflicts.sort((a, b) => a.fromSeq - b.fromSeq || a.zoneName.localeCompare(b.zoneName, 'zh-CN'));
 }
 
 /** 多边形面积 m²（鞋带公式，先投影到米制） */

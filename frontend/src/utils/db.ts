@@ -6,7 +6,7 @@ import { makeThumbDataUrl, type AssetThumb, type ImageAsset } from '../types/ima
 import { newId } from './id';
 
 export const DB_NAME = 'gbdronemap';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbdronemap:db-version';
 
 class DroneMapDB extends Dexie {
@@ -53,6 +53,24 @@ class DroneMapDB extends Dexie {
           .modify((row: any) => {
             if (row.updatedAt === undefined) row.updatedAt = Date.now();
             if (row.batteryCount === undefined) row.batteryCount = 1;
+          });
+      });
+    this.version(3)
+      .stores({
+        missions: 'id, missionNo, areaName, droneModel, flightDate, status, purpose, createdAt',
+        waypoints: 'id, missionId, seq, action, altitude',
+        lines: 'id, missionId, lineNo, updatedAt',
+        assets: 'id, missionId, imageNo, quality, shotAt',
+        thumbs: 'id, missionId',
+        presets: 'id, name, cameraModel',
+      })
+      .upgrade(async (tx) => {
+        // 旧任务没有禁飞区数据，补空数组，照常打开
+        await tx
+          .table('missions')
+          .toCollection()
+          .modify((row: any) => {
+            if (!Array.isArray(row.noFlyZones)) row.noFlyZones = [];
           });
       });
   }
@@ -141,6 +159,16 @@ export async function ensureSeedData(): Promise<void> {
       flightDate: '2024-09-12',
       pilot: '穆清和',
       status: '已飞行',
+      noFlyZones: [
+        {
+          id: newId('nfz'),
+          name: '中心广场临时管制',
+          lng: 116.3945,
+          lat: 39.90535,
+          radius: 80,
+          enabled: true,
+        },
+      ],
       createdAt: now - 30 * day,
     },
     {
@@ -159,6 +187,7 @@ export async function ensureSeedData(): Promise<void> {
       flightDate: '2024-09-20',
       pilot: '纪长风',
       status: '待飞行',
+      noFlyZones: [],
       createdAt: now - 8 * day,
     },
   ];
