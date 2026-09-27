@@ -67,9 +67,10 @@ sologsb-1123/
         ├── index.css
         ├── vite-env.d.ts
         ├── router/index.tsx
-        ├── types/{mission,waypoint,flightline,imageasset}.ts
-        ├── stores/{mission,waypoint,asset}Store.ts
+        ├── types/{mission,waypoint,flightline,imageasset,noflyzone}.ts
+        ├── stores/{mission,waypoint,asset,noflyzone}Store.ts
         ├── components/common/{AmapRouteView,OverlapCalcPanel,AssetGrid,MissionCard}.tsx
+        ├── components/NoFlyZonePanel.tsx
         ├── hooks/{useMissionFilter,useRouteMetrics}.ts
         ├── pages/{MissionList,RoutePlanner,WaypointTable,AssetCatalog,CameraPreset}.tsx
         └── utils/{db,geoCalc,amapLoader,id}.ts
@@ -80,7 +81,7 @@ sologsb-1123/
 | 路由 | 页面 | 消费模型 |
 | --- | --- | --- |
 | `/missions` | 任务台账：按测区/机型/飞行日期区间/状态筛选，显示航线数、预计张数与成果条目数 | Mission |
-| `/missions/:id/route` | 航线规划主视图：地图/网格绘制测区与航点折线，右侧参数面板改航高/航速/重叠率，实时回算 GSD、航线间距、预计张数与耗时 | Mission、Waypoint、FlightLine |
+| `/missions/:id/route` | 航线规划主视图：地图/网格绘制测区与航点折线，右侧参数面板改航高/航速/重叠率，实时回算 GSD、航线间距、预计张数与耗时；支持任务级禁飞区录入、地图标范围与逐段冲突拦截 | Mission、Waypoint、FlightLine、NoFlyZone |
 | `/missions/:id/waypoints` | 航点明细：经纬度粘贴导入、批量改高度、上下移与拖拽换序、单点视场预览 | Waypoint |
 | `/missions/:id/assets` | 成果影像编目：卡片格子列出片号/缩略图/GSD/质量，多选标记质量、定位到图、导出清单 | ImageAsset |
 | `/settings/camera` | 相机与传感器参数预设管理，选定预设后带入任务的焦距/像元/传感器 | CameraPreset、Mission |
@@ -94,11 +95,13 @@ sologsb-1123/
 - **航线间距** = 旁向幅宽 × (1 − 旁向重叠率)；**拍照间隔** = 航向幅宽 × (1 − 航向重叠率)
 - **预计张数** = Σ(每条航带长度 / 拍照间隔 + 1)；**预计耗时** = (总航程 / 航速 + 转弯与悬停附加) / 60；**电池组数** 按 20 min 有效续航向上取整
 - **测区面积**：经纬度投影到米制后用鞋带公式；**航带路径长度**：逐段球面近似距离累加
+- **禁飞区冲突检查**：圆形管制区按「半径 + 50 m 安全余量」生成检查圆，航点折线逐段计算线段到圆心的最近距离（米制平面投影），距离 ≤ 检查半径即判定穿入；结果列出受影响航段（`#起点序号 → #终点序号`、最近距离、侵入量）。仅检查启用中的区域，存在冲突时航线参数不能保存，停用区域或挪开航点后自动恢复
 
 ## 数据存储说明
 
-- 数据库名 `gbdronemap`，当前结构版本 **v2**（`localStorage['gbdronemap:db-version']` 记录）。
-- 六张表：`missions`（任务）、`waypoints`（航点）、`lines`（航线参数）、`assets`（成果影像条目）、`thumbs`（**缩略图单独建表**，dataUrl）、`presets`（相机预设）。
+- 数据库名 `gbdronemap`，当前结构版本 **v3**（`localStorage['gbdronemap:db-version']` 记录）。
+- 七张表：`missions`（任务）、`waypoints`（航点）、`lines`（航线参数）、`assets`（成果影像条目）、`thumbs`（**缩略图单独建表**，dataUrl）、`presets`（相机预设）、`noflyzones`（**任务级禁飞区**：名称/中心经纬度/半径/启用开关）。
 - v1 → v2 迁移：为老任务补 `areaPolygon`/传感器默认值，为航线补 `updatedAt`/`batteryCount`，并新增索引。
+- v2 → v3 迁移：新增 `noflyzones` 表，老数据无需回填——旧任务没有区域数据时按"无禁飞区"照常打开、正常保存。
 - 容器无状态、不挂载命名卷；清空站点数据即回到初始示范数据。
-- 首次打开灌入 2 个示范任务、5 个航点、2 条航线参数、6 条成果影像条目（含缩略图）与 3 套相机预设。
+- 首次打开灌入 2 个示范任务、5 个航点、2 条航线参数、6 条成果影像条目（含缩略图）、3 套相机预设与 1 个示范禁飞区。

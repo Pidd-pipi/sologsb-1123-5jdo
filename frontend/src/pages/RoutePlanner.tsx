@@ -3,11 +3,15 @@ import { Link, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Row, Space, Table, Tag, Typography, type TableProps } from 'antd';
 import { useMissionStore } from '../stores/missionStore';
 import { useWaypointStore } from '../stores/waypointStore';
+import { useNoFlyZoneStore } from '../stores/noflyzoneStore';
 import { useRouteMetrics, DEFAULT_ROUTE_PARAMS, type RouteParams } from '../hooks/useRouteMetrics';
 import AmapRouteView from '../components/common/AmapRouteView';
 import OverlapCalcPanel from '../components/common/OverlapCalcPanel';
+import NoFlyZonePanel from '../components/common/NoFlyZonePanel';
 import { loadFlightLine, saveFlightLine, splitSorties } from '../utils/db';
 import { newId } from '../utils/id';
+import { checkNoFlyConflicts, conflictSegmentPairs } from '../utils/geoCalc';
+import { NOFLY_SAFETY_MARGIN_M } from '../types/noflyzone';
 import type { FlightLine } from '../types/flightline';
 import type { Waypoint } from '../types/waypoint';
 
@@ -24,11 +28,27 @@ export default function RoutePlanner() {
   const missions = useMissionStore((s) => s.items);
   const waypoints = useWaypointStore((s) => s.items);
   const addWaypoint = useWaypointStore((s) => s.add);
+  const noFlyZones = useNoFlyZoneStore((s) => s.items);
   const mission = missions.find((m) => m.id === id);
   const missionWaypoints = useMemo(
     () => waypoints.filter((w) => w.missionId === id).sort((a, b) => a.seq - b.seq),
     [waypoints, id],
   );
+  const missionZones = useMemo(() => noFlyZones.filter((z) => z.missionId === id), [noFlyZones, id]);
+  // 按边界外 50 m 安全余量逐段检查；停用的区域不参与
+  const noFlyConflicts = useMemo(
+    () => checkNoFlyConflicts(missionWaypoints, missionZones),
+    [missionWaypoints, missionZones],
+  );
+  const conflictPairs = useMemo(() => conflictSegmentPairs(noFlyConflicts), [noFlyConflicts]);
+  const hasConflict = noFlyConflicts.length > 0;
+
+  // 挪开航点 / 停用区域使冲突解除后，清掉残留的拦截提示（不影响其他错误）
+  useEffect(() => {
+    if (!hasConflict) {
+      setError((prev) => (prev.startsWith('航线穿入禁飞区') ? '' : prev));
+    }
+  }, [hasConflict]);
 
   const [params, setParams] = useState<RouteParams>({ ...DEFAULT_ROUTE_PARAMS });
   const [savedText, setSavedText] = useState('');
@@ -58,6 +78,11 @@ export default function RoutePlanner() {
 
   const onSave = async () => {
     if (!mission) return;
+    // 存在禁飞区冲突（含 50 m 安全余量）时禁止保存航线参数
+    if (hasConflict) {
+      setError('航线穿入禁飞区（含边界外 50 m 安全余量），请挪开航点或停用相关区域后再保存');
+      return;
+    }
     const line: FlightLine = {
       id: newId('line'),
       missionId: mission.id,
@@ -129,6 +154,12 @@ export default function RoutePlanner() {
         <Tag color="cyan">{mission.purpose}</Tag>
         <Tag>{mission.areaName}</Tag>
         <Tag color={missionWaypoints.length > 0 ? 'green' : 'default'}>航点 {missionWaypoints.length} 个</Tag>
+        {missionZones.length > 0 ? (
+          <Tag color={hasConflict ? 'error' : 'red'}>
+            禁飞区 {missionZones.filter((z) => z.enabled).length}/{missionZones.length} 个启用
+            {hasConflict ? ` · ${conflictPairs.length} 段冲突` : ''}
+          </Tag>
+        ) : null}
         <div style={{ flex: 1 }} />
         <Button type="link">
           <Link to={`/missions/${mission.id}/waypoints`}>航点明细</Link>
@@ -155,6 +186,8 @@ export default function RoutePlanner() {
               altitude={params.altitude}
               height={440}
               onPickPoint={pickPoint}
+              noFlyZones={missionZones}
+              conflictPairs={conflictPairs}
             />
           </Card>
           <Card size="small" title="航线参数明细" style={{ marginTop: 14 }}>
@@ -197,7 +230,12 @@ export default function RoutePlanner() {
             metrics={metrics}
             onSave={onSave}
             savedText={savedText}
+            saveDisabled={hasConflict}
+            saveDisabledReason={`存在 ${conflictPairs.length} 个穿越禁飞区（含边界外 ${NOFLY_SAFETY_MARGIN_M} m 安全余量）的航段，挪开航点或停用区域后可保存`}
           />
+          <div style={{ marginTop: 14 }}>
+            <NoFlyZonePanel missionId={mission.id} zones={missionZones} conflicts={noFlyConflicts} />
+          </div>
         </Col>
       </Row>
 

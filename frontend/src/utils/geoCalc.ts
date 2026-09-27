@@ -1,4 +1,6 @@
 import type { LngLat } from '../types/mission';
+import { NOFLY_SAFETY_MARGIN_M, type NoFlyZone } from '../types/noflyzone';
+import type { Waypoint } from '../types/waypoint';
 import { round } from './id';
 
 /** 每度纬度对应的米数（近似） */
@@ -135,4 +137,87 @@ export function estimateDuration(totalLengthM: number, speedMs: number, waypoint
 export function estimateBatteries(durationMin: number): number {
   if (durationMin <= 0) return 0;
   return Math.max(1, Math.ceil(durationMin / 20));
+}
+
+/** 线段（p1→p2）到点 center 的最短水平距离 m（米制平面近似） */
+export function segmentToPointDistanceMeters(p1: LngLat, p2: LngLat, center: LngLat): number {
+  // 以圆心为原点投影，x 东向、y 北向；小范围内经度方向比例取圆心纬度即可
+  const a = lngLatToMeters(p1, center);
+  const b = lngLatToMeters(p2, center);
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return Math.hypot(a.x, a.y);
+  const t = Math.min(1, Math.max(0, -(a.x * dx + a.y * dy) / len2));
+  return Math.hypot(a.x + t * dx, a.y + t * dy);
+}
+
+/** 受禁飞区影响的单个航段 */
+export interface NoFlySegmentHit {
+  /** 航段起点航点序号 */
+  fromSeq: number;
+  /** 航段终点航点序号 */
+  toSeq: number;
+  /** 该航段到圆心的最近距离 m */
+  minDistance: number;
+  /** 该航段对安全余量圆的侵入量 m（>0 表示穿入） */
+  intrusion: number;
+}
+
+/** 单个禁飞区的冲突结果 */
+export interface NoFlyConflict {
+  zone: NoFlyZone;
+  /** 含 50 m 安全余量的有效检查半径 m */
+  effectiveRadius: number;
+  segments: NoFlySegmentHit[];
+}
+
+/**
+ * 逐段检查航点折线是否穿入禁飞区（边界外再留 NOFLY_SAFETY_MARGIN_M 的安全余量）。
+ * 只检查 enabled 的区域；返回有冲突的区域及具体航段（从哪一点到哪一点）。
+ */
+export function checkNoFlyConflicts(
+  waypoints: Waypoint[],
+  zones: NoFlyZone[],
+  marginM: number = NOFLY_SAFETY_MARGIN_M,
+): NoFlyConflict[] {
+  const ordered = [...waypoints].sort((a, b) => a.seq - b.seq);
+  const conflicts: NoFlyConflict[] = [];
+  zones
+    .filter((z) => z.enabled)
+    .forEach((zone) => {
+      const effectiveRadius = zone.radius + marginM;
+      const segments: NoFlySegmentHit[] = [];
+      for (let i = 1; i < ordered.length; i += 1) {
+        const from = ordered[i - 1];
+        const to = ordered[i];
+        const minDistance = segmentToPointDistanceMeters([from.lng, from.lat], [to.lng, to.lat], [zone.lng, zone.lat]);
+        if (minDistance <= effectiveRadius) {
+          segments.push({
+            fromSeq: from.seq,
+            toSeq: to.seq,
+            minDistance: round(minDistance, 1),
+            intrusion: round(effectiveRadius - minDistance, 1),
+          });
+        }
+      }
+      if (segments.length > 0) conflicts.push({ zone, effectiveRadius, segments });
+    });
+  return conflicts;
+}
+
+/** 汇总所有冲突涉及的航段序号对（用于地图高亮） */
+export function conflictSegmentPairs(conflicts: NoFlyConflict[]): [number, number][] {
+  const keys = new Set<string>();
+  const pairs: [number, number][] = [];
+  conflicts.forEach((c) =>
+    c.segments.forEach((s) => {
+      const key = `${s.fromSeq}-${s.toSeq}`;
+      if (!keys.has(key)) {
+        keys.add(key);
+        pairs.push([s.fromSeq, s.toSeq]);
+      }
+    }),
+  );
+  return pairs;
 }

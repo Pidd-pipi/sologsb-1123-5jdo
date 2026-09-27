@@ -2,11 +2,12 @@ import Dexie, { type Table } from 'dexie';
 import type { CameraPreset, Mission } from '../types/mission';
 import type { Waypoint } from '../types/waypoint';
 import type { FlightLine } from '../types/flightline';
+import type { NoFlyZone } from '../types/noflyzone';
 import { makeThumbDataUrl, type AssetThumb, type ImageAsset } from '../types/imageasset';
 import { newId } from './id';
 
 export const DB_NAME = 'gbdronemap';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbdronemap:db-version';
 
 class DroneMapDB extends Dexie {
@@ -16,6 +17,7 @@ class DroneMapDB extends Dexie {
   assets!: Table<ImageAsset, string>;
   thumbs!: Table<AssetThumb, string>;
   presets!: Table<CameraPreset, string>;
+  noflyzones!: Table<NoFlyZone, string>;
 
   constructor() {
     super(DB_NAME);
@@ -55,6 +57,16 @@ class DroneMapDB extends Dexie {
             if (row.batteryCount === undefined) row.batteryCount = 1;
           });
       });
+    // v3：任务级禁飞区（临时管制）新表，老任务没有区域数据即等同于无禁飞区，无需回填
+    this.version(3).stores({
+      missions: 'id, missionNo, areaName, droneModel, flightDate, status, purpose, createdAt',
+      waypoints: 'id, missionId, seq, action, altitude',
+      lines: 'id, missionId, lineNo, updatedAt',
+      assets: 'id, missionId, imageNo, quality, shotAt',
+      thumbs: 'id, missionId',
+      presets: 'id, name, cameraModel',
+      noflyzones: 'id, missionId, name, enabled',
+    });
   }
 }
 
@@ -86,6 +98,12 @@ export async function loadFlightLine(missionId: string): Promise<FlightLine | un
 /** 保存 / 更新航线参数 */
 export async function saveFlightLine(line: FlightLine): Promise<void> {
   await db.lines.put(line);
+}
+
+/** 读取某任务的全部禁飞区（按创建顺序） */
+export async function loadNoFlyZones(missionId: string): Promise<NoFlyZone[]> {
+  const rows = await db.noflyzones.where('missionId').equals(missionId).toArray();
+  return rows.sort((a, b) => a.createdAt - b.createdAt);
 }
 
 /** 按航线参数把任务拆分为多架次（每架次按电池组数分组） */
@@ -257,6 +275,20 @@ export async function ensureSeedData(): Promise<void> {
     thumbs.push({ id, missionId: missionA, dataUrl: makeThumbDataUrl(`IMG_${1001 + index}`, quality, lng, lat) });
   });
 
+  // 示范任务 A：测区北侧的临时管制区（与示范航段保持 >50 m 余量，仅在地图标出、不拦截保存）
+  const noFlyZones: NoFlyZone[] = [
+    {
+      id: newId('nfz'),
+      missionId: missionA,
+      name: '景山公园活动临时管制',
+      lng: 116.394,
+      lat: 39.9105,
+      radius: 100,
+      enabled: true,
+      createdAt: now - 5 * day,
+    },
+  ];
+
   const presets: CameraPreset[] = [
     {
       id: newId('preset'),
@@ -287,13 +319,14 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
-  // 六张表超过 Dexie 位置参数上限，改用数组形式声明事务范围
-  await db.transaction('rw', [db.missions, db.waypoints, db.lines, db.assets, db.thumbs, db.presets], async () => {
+  // 七张表超过 Dexie 位置参数上限，改用数组形式声明事务范围
+  await db.transaction('rw', [db.missions, db.waypoints, db.lines, db.assets, db.thumbs, db.presets, db.noflyzones], async () => {
     await db.missions.bulkPut(missions);
     await db.waypoints.bulkPut(waypoints);
     await db.lines.bulkPut(lines);
     await db.assets.bulkPut(assets);
     await db.thumbs.bulkPut(thumbs);
     await db.presets.bulkPut(presets);
+    await db.noflyzones.bulkPut(noFlyZones);
   });
 }
